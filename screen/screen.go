@@ -6,6 +6,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"math/rand"
+	"sort"
 	"sync"
 
 	"github.com/BurntSushi/xgb"
@@ -26,6 +27,11 @@ func getConn() (*xgb.Conn, error) {
 		conn, err = xgb.NewConn()
 	})
 	return conn, err
+}
+
+// Exported for use in other packages
+func GetConn() (*xgb.Conn, error) {
+	return getConn()
 }
 
 // Initialize XDamage and create a damage object for the root window
@@ -159,4 +165,134 @@ func CaptureJPEG() ([]byte, error) {
 	// Use jpeg encoding with quality 80 (adjust as needed)
 	err = jpeg.Encode(buf, downscaled, &jpeg.Options{Quality: 80})
 	return buf.Bytes(), err
+}
+
+type DeltaFrame struct {
+	X, Y, Width, Height int
+	Data                []byte
+}
+
+// Merge overlapping or adjacent rectangles
+func mergeRects(rects []xproto.Rectangle) []xproto.Rectangle {
+	if len(rects) == 0 {
+		return rects
+	}
+	// Sort by X, then Y
+	sort.Slice(rects, func(i, j int) bool {
+		if rects[i].X == rects[j].X {
+			return rects[i].Y < rects[j].Y
+		}
+		return rects[i].X < rects[j].X
+	})
+	merged := []xproto.Rectangle{rects[0]}
+	for _, r := range rects[1:] {
+		last := &merged[len(merged)-1]
+		// If rectangles overlap or are adjacent, merge them
+		if int(r.X) <= int(last.X)+int(last.Width) &&
+			int(r.Y) <= int(last.Y)+int(last.Height) {
+			// Expand last rectangle to include r
+			x1 := min(int(last.X), int(r.X))
+			y1 := min(int(last.Y), int(r.Y))
+			x2 := max(int(last.X)+int(last.Width), int(r.X)+int(r.Width))
+			y2 := max(int(last.Y)+int(last.Height), int(r.Y)+int(r.Height))
+			last.X = int16(x1)
+			last.Y = int16(y1)
+			last.Width = uint16(x2 - x1)
+			last.Height = uint16(y2 - y1)
+		} else {
+			merged = append(merged, r)
+		}
+	}
+	return merged
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	} else {
+		return b
+	}
+}
+func max(a, b int) int {
+	if a > b {
+		return a
+	} else {
+		return b
+	}
+}
+
+// Frame buffer for latest delta frames
+var (
+	deltaFrameBuf   []DeltaFrame
+	deltaFrameBufMu sync.Mutex
+)
+
+// CaptureDeltaJPEG returns a slice of JPEG-encoded merged changed regions
+func CaptureDeltaJPEG() ([]DeltaFrame, error) {
+	conn, err := getConn()
+	if err != nil {
+		return nil, err
+	}
+	rects, err := GetChangedRects()
+	if err != nil {
+		return nil, err
+	}
+	if len(rects) == 0 {
+		// Return buffered frame if available
+		deltaFrameBufMu.Lock()
+		defer deltaFrameBufMu.Unlock()
+		if len(deltaFrameBuf) > 0 {
+			return deltaFrameBuf, nil
+		}
+		return nil, nil
+	}
+
+	// Merge regions for efficiency
+	rects = mergeRects(rects)
+
+	setup := xproto.Setup(conn)
+	screen := setup.DefaultScreen(conn)
+	width := int(screen.WidthInPixels)
+	height := int(screen.HeightInPixels)
+
+	reply, err := xproto.GetImage(conn, xproto.ImageFormatZPixmap, xproto.Drawable(screen.Root),
+		0, 0, uint16(width), uint16(height), 0xffffffff).Reply()
+	if err != nil {
+		return nil, err
+	}
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	src := reply.Data
+	dst := img.Pix
+	for i := 0; i+3 < len(src) && i+3 < len(dst); i += 4 {
+		dst[i+0] = src[i+2]
+		dst[i+1] = src[i+1]
+		dst[i+2] = src[i+0]
+		dst[i+3] = 255
+	}
+
+	var deltas []DeltaFrame
+	for _, r := range rects {
+		rect := image.Rect(int(r.X), int(r.Y), int(r.X)+int(r.Width), int(r.Y)+int(r.Height))
+		cropped := image.NewRGBA(rect)
+		draw.Draw(cropped, rect, img, rect.Min, draw.Src)
+		buf := new(bytes.Buffer)
+		_ = jpeg.Encode(buf, cropped, &jpeg.Options{Quality: 80})
+		deltas = append(deltas, DeltaFrame{
+			X:      int(r.X),
+			Y:      int(r.Y),
+			Width:  int(r.Width),
+			Height: int(r.Height),
+			Data:   buf.Bytes(),
+		})
+	}
+	// Update frame buffer
+	deltaFrameBufMu.Lock()
+	deltaFrameBuf = deltas
+	deltaFrameBufMu.Unlock()
+	return deltas, nil
+}
+
+// Helper: decode JPEG delta frame to image.Image (for local testing or client-side Go)
+func DecodeDeltaJPEG(data []byte) (image.Image, error) {
+	return jpeg.Decode(bytes.NewReader(data))
 }
