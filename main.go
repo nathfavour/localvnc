@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"net"
 	"os"
@@ -10,7 +11,16 @@ import (
 )
 
 func main() {
-	port := 3456
+	// Add port and help flags
+	port := flag.Int("port", 3456, "Port to run the server on")
+	help := flag.Bool("help", false, "Show help message")
+	flag.Parse()
+
+	if *help {
+		fmt.Println("Usage: localvnc [--port PORT]")
+		flag.PrintDefaults()
+		os.Exit(0)
+	}
 
 	// Get local IP address
 	addrs, err := net.InterfaceAddrs()
@@ -29,12 +39,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Could not determine local IP address. Is your network connected?")
 		os.Exit(1)
 	}
-	url := fmt.Sprintf("http://%s:%d", localIP, port)
+	url := fmt.Sprintf("http://%s:%d", localIP, *port)
 	fmt.Println("Streaming on:", url)
 	qrcode.PrintQRCode(url)
 
-	fmt.Printf("Starting server on port %d...\n", port)
-	err = server.Start(port)
+	fmt.Printf("Starting server on port %d...\n", *port)
+	err = server.Start(*port)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to start server: %v\n", err)
 		fmt.Fprintln(os.Stderr, "If you see a blank page, check your system's screen capture permissions.")
