@@ -7,12 +7,13 @@ import (
 	"time"
 )
 
-func Start(port int) {
+func Start(port int) error {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
 		for {
 			img, err := screen.CapturePNG()
 			if err != nil {
+				http.Error(w, fmt.Sprintf("Screen capture error: %v", err), http.StatusInternalServerError)
 				fmt.Println("Capture error:", err)
 				break
 			}
@@ -22,5 +23,5 @@ func Start(port int) {
 			time.Sleep(100 * time.Millisecond)
 		}
 	})
-	http.ListenAndServe(fmt.Sprintf(":%d", port), nil)
+	return http.ListenAndServe(fmt.Sprintf(":%d", port), nil)
 }
